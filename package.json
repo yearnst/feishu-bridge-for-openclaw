@@ -1,0 +1,19 @@
+{
+  "name": "feishu-bridge",
+  "version": "0.1.0",
+  "description": "Feishu/Lark Event Subscription bridge → forward to local OpenClaw/Clawdbot agent → reply back (supports files/images).",
+  "author": "Charles Chern @AIlinker",
+  "license": "MIT",
+  "private": false,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node --env-file=.env server.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "express": "^4.19.2"
+  }
+}

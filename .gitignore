@@ -1,0 +1,17 @@
+# env / secrets
+.env
+.env.*
+
+# macOS
+.DS_Store
+
+# deps
+node_modules/
+
+# runtime data
+downloads/
+outputs/
+*.log
+
+# misc
+*.tmp

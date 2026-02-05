@@ -1,0 +1,12 @@
+services:
+  feishu-bridge:
+    build:
+      context: ..
+      dockerfile: feishu-bridge/Dockerfile
+    ports:
+      - "8787:8787"
+    env_file:
+      - .env
+    volumes:
+      - ./downloads:/data/downloads
+    restart: unless-stopped
