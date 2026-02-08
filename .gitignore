@@ -15,3 +15,6 @@ outputs/
 
 # misc
 *.tmp
+
+# local notes / release drafting
+RELEASE_NOTES_*.md
