@@ -1,4 +1,4 @@
-# Feishu bridge for OpenClaw
+# Feishu bridge for OpenClaw（兼容长连接和开发者服务器方式）
 
 > Maintainer: **Charles Chern @AIlinker**  
 > Repo: <https://github.com/yearnst/feishu-bridge-for-openclaw>
