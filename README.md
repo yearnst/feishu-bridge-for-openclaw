@@ -115,16 +115,18 @@ Tip / 提示：首次联调建议先用 `ECHO_MODE=true`，确认机器人能回
 
 ---
 
+## Demo / 动图演示
+
+<img src="assets/Screenshots/openclaw-feishu.gif" width="720" />
+
+---
+
 ## Screenshots / 截图
 
 <details>
 <summary>Click to expand / 点击展开</summary>
 
 ### Socket Mode / 长连接
-
-**Demo GIF / 动图演示**
-
-<img src="assets/Screenshots/openclaw-feishu.gif" width="720" />
 
 <img src="assets/Screenshots/飞书后台机器人配置-[长连接socket方式].png" width="720" />
 
