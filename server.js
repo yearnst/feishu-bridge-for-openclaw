@@ -1,4 +1,5 @@
 import express from "express";
+import * as Lark from "@larksuiteoapi/node-sdk";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -93,6 +94,28 @@ app.use((req, _res, next) => {
 const PORT = Number(process.env.PORT || 8787);
 const VERIFICATION_TOKEN = process.env.FEISHU_VERIFICATION_TOKEN || "";
 const ENCRYPT_KEY = process.env.FEISHU_ENCRYPT_KEY || "";
+
+// Receive mode:
+// - webhook: Feishu pushes events to our /feishu/events HTTP endpoint (needs public URL/tunnel)
+// - socket: this process connects to Feishu via WebSocket (no public URL needed)
+// - both: enable both (useful for migration/testing; avoid in production to prevent surprises)
+// Default to socket mode for local development convenience.
+const FEISHU_RECEIVE_MODE = String(process.env.FEISHU_RECEIVE_MODE || "socket").toLowerCase();
+const ENABLE_WEBHOOK = FEISHU_RECEIVE_MODE === "webhook" || FEISHU_RECEIVE_MODE === "both";
+const ENABLE_SOCKET = FEISHU_RECEIVE_MODE === "socket" || FEISHU_RECEIVE_MODE === "both";
+
+// --- Startup self-check: warn if we're "connected" but not receiving any events.
+const STARTUP_SELF_CHECK_MS = Number(process.env.STARTUP_SELF_CHECK_MS || 30_000);
+let inboundAnyCount = 0;
+let inboundSocketCount = 0;
+let inboundWebhookCount = 0;
+let firstInboundAt = 0;
+function noteInbound(source) {
+  inboundAnyCount++;
+  if (!firstInboundAt) firstInboundAt = Date.now();
+  if (source === "socket") inboundSocketCount++;
+  if (source === "webhook") inboundWebhookCount++;
+}
 
 const REQUIRE_MENTION_IN_GROUP = envBool("REQUIRE_MENTION_IN_GROUP", true);
 const ECHO_MODE = envBool("ECHO_MODE", true);
@@ -802,6 +825,274 @@ function getReplyTarget(event) {
   return { receive_id_type: "chat_id", receive_id: chat_id };
 }
 
+// --- Socket mode (native) handler
+// In socket mode, Feishu pushes events to us via WebSocket.
+// We handle them directly here (no local HTTP hop), so socket mode can run without any tunnel.
+async function handleSocketMessageEvent(event) {
+  if (!event) return;
+
+  let text = extractTextMessage(event);
+  if (text == null) text = extractPostMessageText(event);
+
+  const fileMsg = extractFileMessage(event);
+  const imageMsg = extractImageMessage(event);
+  const group = isGroupChat(event);
+  const chatId = event?.message?.chat_id;
+
+  if (event?.message?.message_type === "post") {
+    const ks = extractPostImageKeys(event);
+    if (ks.length) console.log("post embedded images", { chatId, count: ks.length, sample: ks.slice(0, 2) });
+    if (group && chatId && ks.length) cacheGroupItem(chatId, { kind: "image", name: "(embedded image)", image_key: ks[0] });
+  }
+
+  if (group && chatId && text && String(text).trim()) {
+    cacheGroupItem(chatId, { kind: "text", text: String(text).trim().slice(0, 800) });
+  }
+
+  // Feishu group @mentions can arrive as a text OR post message with empty content.
+  if ((event?.message?.message_type === "text" || event?.message?.message_type === "post") && (!text || !String(text).trim()) && botWasMentioned(event)) {
+    text = "[feishu:mention]";
+  }
+
+  const wasMentioned = botWasMentioned(event);
+
+  // Group gating: ignore unless @mentioned.
+  // Exception: allow inbound media (image/file) to pass so we can cache it.
+  if (group && REQUIRE_MENTION_IN_GROUP && !wasMentioned && !fileMsg && !imageMsg) {
+    return;
+  }
+
+  if (!text && !fileMsg && !imageMsg) return;
+
+  const target = getReplyTarget(event);
+  if (!target) return;
+
+  if (ECHO_MODE) {
+    if (group && REQUIRE_MENTION_IN_GROUP && !wasMentioned) return;
+
+    const prefix = group ? "[群聊]" : "[私聊]";
+    let reply = "";
+    if (text) reply = `${prefix} 收到：${text}`;
+    else if (fileMsg) reply = `${prefix} 收到文件：${fileMsg.file_name || "(unknown)"} file_key=${fileMsg.file_key || "(none)"}`;
+    else if (imageMsg) reply = `${prefix} 收到图片：image_key=${imageMsg.image_key || "(none)"}`;
+
+    try {
+      await sendTextMessage({ ...target, text: reply });
+    } catch (err) {
+      console.error("sendTextMessage failed", err);
+    }
+    return;
+  }
+
+  // Real mode: forward into OpenClaw/Clawdbot and reply with the model output.
+  const sessionId = group ? `feishu:group:${event?.message?.chat_id}` : `feishu:p2p:${event?.message?.chat_id}`;
+
+  let forwardText = text;
+
+  const channelPreamble = [
+    "[channel:feishu]",
+    "You are replying inside a Feishu (Lark) chat.",
+    "This chat supports sending images/files. To send an attachment, include lines like:",
+    "FILE: <local path>",
+    "MEDIA: <local path>",
+    `When generating files (e.g., PDFs), always save them under: ${OUTPUTS_DIR} and reference them as FILE: outputs/<name>.`,
+    "Do NOT mention WhatsApp/Telegram or other channels unless the user explicitly asks.",
+    "[/channel]",
+    "",
+  ].join("\n");
+
+  // If user sent a file/image, download it locally and pass a FILE: line to the model.
+  const inboundAttachments = [];
+  if (fileMsg?.message_id && fileMsg?.file_key) {
+    console.log("inbound file msg", fileMsg);
+    try {
+      const buf = await downloadMessageResource({ message_id: fileMsg.message_id, file_key: fileMsg.file_key, type: "file" });
+      const saved = saveDownloadedResource({ buffer: buf, fileName: fileMsg.file_name || `feishu_file_${fileMsg.file_key}` });
+      inboundAttachments.push(saved);
+      console.log("saved inbound file", saved);
+      if (chatId) {
+        rememberPendingInbound(chatId, saved);
+        cacheGroupItem(chatId, { kind: "file", name: fileMsg.file_name || path.basename(saved), path: saved });
+      }
+    } catch (err) {
+      console.error("download inbound file failed", err);
+    }
+  }
+  if (imageMsg?.message_id && imageMsg?.image_key) {
+    console.log("inbound image msg", imageMsg);
+    try {
+      const buf = await downloadMessageResource({ message_id: imageMsg.message_id, file_key: imageMsg.image_key, type: "image" });
+      const saved = saveDownloadedResource({ buffer: buf, fileName: `feishu_image_${imageMsg.image_key}.jpg` });
+      inboundAttachments.push(saved);
+      console.log("saved inbound image", saved);
+      if (chatId) {
+        rememberPendingInbound(chatId, saved);
+        cacheGroupItem(chatId, { kind: "image", name: path.basename(saved), path: saved });
+      }
+    } catch (err) {
+      console.error("download inbound image failed", err);
+      if (wasMentioned) {
+        try {
+          await sendTextMessage({
+            ...target,
+            text: `I received an image reference but failed to download it from Feishu.\nimage_key=${imageMsg.image_key}\nError: ${String(err?.message || err)}`,
+          });
+        } catch {}
+      }
+    }
+  }
+
+  if (!forwardText && fileMsg) {
+    forwardText = `[feishu:file] name=${fileMsg.file_name || ""} file_key=${fileMsg.file_key || ""}`.trim();
+  }
+  if (!forwardText && imageMsg) {
+    forwardText = `[feishu:image] image_key=${imageMsg.image_key || ""}`.trim();
+  }
+
+  // Attach pending media for group mention scenarios (same logic as webhook path)
+  if (wasMentioned && chatId && inboundAttachments.length === 0) {
+    const pendingItems0 = peekPendingInboundItems(chatId);
+    const hasPending = pendingItems0.length > 0;
+    const newestAgeMs = hasPending ? Math.min(...pendingItems0.map((x) => x.ageMs)) : Infinity;
+
+    const trimmed = String(forwardText || "").trim();
+    const isMentionOnly = trimmed === "[feishu:mention]" || trimmed.length <= 2;
+
+    const wantsByKeywords = shouldAttachPendingMediaByKeywords(forwardText);
+    const wantsByImplicitPair = isMentionOnly && hasPending && newestAgeMs <= IMPLICIT_PAIR_WINDOW_MS;
+
+    if (wantsByKeywords || wantsByImplicitPair) {
+      let pending = takePendingInbound(chatId);
+      if (!pending.length && MENTION_MEDIA_WAIT_MS > 0) {
+        const deadline = Date.now() + MENTION_MEDIA_WAIT_MS;
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 250));
+          pending = takePendingInbound(chatId);
+          if (pending.length) break;
+        }
+      }
+
+      for (const p of pending) inboundAttachments.push(p);
+      if (pending.length) console.log("attached pending inbound", { chatId, count: pending.length, wantsByKeywords, wantsByImplicitPair, newestAgeMs });
+
+      if ((isMentionOnly || !trimmed) && inboundAttachments.length) {
+        forwardText = "User sent an image/file and mentioned you but provided no question. First describe the content and ask what to do next.";
+      }
+    }
+  }
+
+  if (group && REQUIRE_MENTION_IN_GROUP && !wasMentioned && inboundAttachments.length) {
+    console.log("cached group media without mention", { chatId, count: inboundAttachments.length });
+    return;
+  }
+
+  const parts = [];
+  parts.push(channelPreamble);
+  if (group && chatId) {
+    const ctx = getGroupCacheText(chatId);
+    if (ctx) parts.push(ctx);
+  }
+  if (forwardText) parts.push(forwardText);
+  if (inboundAttachments.length) parts.push(inboundAttachments.map((p) => `FILE: ${p}`).join("\n"));
+  forwardText = parts.join("\n\n").trim();
+
+  const jobId = crypto.randomUUID();
+  console.log("enqueueSessionJob(socket)", { sessionId, jobId, group, hasText: Boolean(text && String(text).trim()), hasFile: Boolean(fileMsg), hasImage: Boolean(imageMsg) });
+
+  let outputSent = false;
+  let hintSent = false;
+
+  const sendText = async (t) => {
+    if (!t) return;
+    outputSent = true;
+    await sendTextMessage({ ...target, text: t });
+  };
+  const sendImage = async (image_key) => {
+    if (!image_key) return;
+    outputSent = true;
+    await sendImageMessage({ ...target, image_key });
+  };
+  const sendFile = async (file_key) => {
+    if (!file_key) return;
+    outputSent = true;
+    await sendFileMessage({ ...target, file_key });
+  };
+
+  const processingHintTimer =
+    SEND_PROCESSING_HINT && PROCESSING_HINT_DELAY_MS > 0
+      ? setTimeout(() => {
+          if (hintSent || outputSent) return;
+          hintSent = true;
+          sendText(`后台处理… 任务ID：${jobId}`).catch(() => {});
+        }, PROCESSING_HINT_DELAY_MS)
+      : null;
+
+  enqueueSessionJob(sessionId, async () => {
+    let progressTimer = null;
+
+    if (PROGRESS_PING_MS && PROGRESS_PING_MS > 0) {
+      progressTimer = setInterval(() => {
+        sendText(`任务 ${jobId} 仍在处理中…`).catch(() => {});
+      }, PROGRESS_PING_MS);
+    }
+
+    try {
+      const { text: replyTextRaw, mediaPaths: mediaPaths0 } = await runClawdbotAgent({
+        sessionId,
+        message: forwardText,
+        timeoutMs: CLAWDBOT_HARD_TIMEOUT_MS || undefined,
+      });
+
+      const mediaPaths = Array.isArray(mediaPaths0) ? [...mediaPaths0] : [];
+      console.log("agent result(socket)", {
+        jobId,
+        sessionId,
+        group,
+        mediaCount: mediaPaths.length,
+        mediaPaths: mediaPaths.slice(0, 5),
+        replyPreview: typeof replyTextRaw === "string" ? replyTextRaw.slice(0, 200) : "(non-string)",
+      });
+
+      // 1) Attachments
+      for (const p of mediaPaths || []) {
+        const raw = String(p || "").trim();
+        if (!raw) continue;
+
+        let abs = resolveLocalMediaPath(raw);
+        if (!abs) {
+          console.error("attachment missing", { raw, cwd: process.cwd(), outputsDir: OUTPUTS_DIR, downloadsDir: DOWNLOAD_DIR, workspaceRoot: WORKSPACE_ROOT });
+          continue;
+        }
+
+        abs = normalizeToOutputs(abs);
+
+        if (guessIsImage(abs)) {
+          const { image_key } = await uploadImageFromPath(abs);
+          await sendImage(image_key);
+        } else {
+          const { file_key } = await uploadFileFromPath(abs);
+          await sendFile(file_key);
+        }
+      }
+
+      // 2) Text
+      let replyText0 = stripToolTraces(replyTextRaw);
+      replyText0 = stripMediaLines(replyText0);
+      const replyText = hintSent && replyText0 ? `已完成（任务ID：${jobId}）：\n${replyText0}` : replyText0;
+      if (replyText) await sendText(replyText);
+    } catch (err) {
+      console.error("clawdbot forward failed(socket)", err);
+      try {
+        const msg = String(err.message || err);
+        await sendText(`任务 ${jobId} 失败：${msg}`);
+      } catch {}
+    } finally {
+      if (processingHintTimer) clearTimeout(processingHintTimer);
+      if (progressTimer) clearInterval(progressTimer);
+    }
+  });
+}
+
 // --- Pending attachment pairing (group chats)
 // Some Feishu clients send an image as a standalone message (no mentions),
 // then the user sends a separate @mention rich-text "post" to ask about it.
@@ -946,6 +1237,9 @@ app.get("/debug/build", async (_req, res) => {
 app.get("/feishu/events", (_req, res) => res.json({ ok: true }));
 
 app.post("/feishu/events", async (req, res) => {
+  // Count inbound activity for startup self-check.
+  noteInbound("webhook");
+
   let body = req.body;
   try {
     const hdr = getHeader(body);
@@ -1385,7 +1679,87 @@ app.post("/feishu/events", async (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`feishu-bridge listening on http://127.0.0.1:${PORT}`);
-  console.log(`Feishu event endpoint: /feishu/events`);
-});
+async function startSocketMode() {
+  const appId = process.env.FEISHU_APP_ID;
+  const appSecret = process.env.FEISHU_APP_SECRET;
+  if (!appId || !appSecret) throw new Error("Socket mode requires FEISHU_APP_ID and FEISHU_APP_SECRET");
+
+  const wsClient = new Lark.WSClient({
+    appId,
+    appSecret,
+    loggerLevel: Lark.LoggerLevel.info,
+  });
+
+  const eventDispatcher = new Lark.EventDispatcher({}).register({
+    "im.message.receive_v1": async (data) => {
+      try {
+        // NOTE: depending on SDK versions/configs, `data` may be the plain event (with `message`)
+        // or an envelope containing `{ event: { ... } }`.
+        const event = (data && typeof data === "object" && data.event && typeof data.event === "object") ? data.event : data;
+
+        noteInbound("socket");
+
+        console.log("socket event received", {
+          hasMessage: Boolean(event?.message),
+          chatType: event?.message?.chat_type,
+          msgType: event?.message?.message_type,
+        });
+
+        await handleSocketMessageEvent(event);
+      } catch (err) {
+        console.error("socket handler error", err);
+      }
+    },
+  });
+
+  wsClient.start({ eventDispatcher });
+  console.log("Feishu socket mode: WSClient started");
+}
+
+const HTTP_SERVER_ENABLED = envBool("HTTP_SERVER_ENABLED", ENABLE_WEBHOOK);
+
+if (HTTP_SERVER_ENABLED) {
+  app.listen(PORT, () => {
+    console.log(`feishu-bridge listening on http://127.0.0.1:${PORT}`);
+    console.log(`Feishu receive mode: ${FEISHU_RECEIVE_MODE}`);
+    if (ENABLE_WEBHOOK) console.log(`Feishu event endpoint (webhook): /feishu/events`);
+  });
+} else {
+  console.log(`feishu-bridge http server disabled (HTTP_SERVER_ENABLED=false)`);
+  console.log(`Feishu receive mode: ${FEISHU_RECEIVE_MODE}`);
+}
+
+if (ENABLE_SOCKET) {
+  startSocketMode().catch((err) => {
+    console.error("Failed to start socket mode", err);
+    process.exitCode = 1;
+  });
+}
+
+// Startup self-check timer
+if (STARTUP_SELF_CHECK_MS > 0) {
+  setTimeout(() => {
+    if (inboundAnyCount > 0) return;
+
+    const tips = [];
+    if (ENABLE_SOCKET) {
+      tips.push(
+        "[self-check] Socket mode 已启动但未收到任何事件。常见原因：\n" +
+          "- 飞书后台切换订阅方式/事件/权限后未重新发布应用（常见）\n" +
+          "- 事件订阅未勾选 im.message.receive_v1 或未生效\n" +
+          "- 你私聊的不是这个应用的机器人，或应用未安装/可见范围不包含你\n" +
+          "- 同一 appId 有另一个 Socket 客户端在线，事件被它随机接收（长连接为集群模式）"
+      );
+    }
+    if (HTTP_SERVER_ENABLED && ENABLE_WEBHOOK) {
+      tips.push(
+        "[self-check] Webhook 模式已启用但未收到回调。常见原因：\n" +
+          "- 飞书后台 Request URL 未指向 /feishu/events 或 tunnel/域名不可达\n" +
+          "- verification token/encrypt key 配置不匹配导致校验/解密失败\n" +
+          "- 飞书仍处于长连接订阅方式（未切回开发者服务器）"
+      );
+    }
+
+    if (tips.length) console.warn(tips.join("\n\n"));
+  }, STARTUP_SELF_CHECK_MS);
+}

@@ -44,14 +44,46 @@ The bridge will decrypt the payload (AES-256-CBC; several compatibility variants
 ## Not implemented yet
 - Smart extraction (OCR / PDF text extraction). Currently the model just receives the local file path.
 
-## Run (local)
+## Run
+
+### Option A: Socket Mode (recommended)
+
+1) In Feishu developer console, switch Event Subscription mode to **persistent connection (Socket Mode)** and subscribe to `im.message.receive_v1`.
+2) `.env` minimal:
+
+```env
+FEISHU_RECEIVE_MODE=socket
+HTTP_SERVER_ENABLED=false
+```
+
+3) Run:
 
 ```bash
-cd feishu-bridge
 cp .env.example .env
 npm install
-npm start
+npm run start:socket
 ```
+
+### Option B: Webhook Mode
+
+1) Configure Request URL: `https://<your-domain-or-tunnel>/feishu/events`
+2) `.env` minimal:
+
+```env
+FEISHU_RECEIVE_MODE=webhook
+HTTP_SERVER_ENABLED=true
+PORT=8787
+```
+
+3) Run:
+
+```bash
+cp .env.example .env
+npm install
+npm run start:webhook
+```
+
+Health check: `GET http://127.0.0.1:8787/health`
 
 > For a beginner-friendly step-by-step guide (Feishu console, tunnel, verification), see: `DEPLOY.en.md`
 

@@ -53,51 +53,65 @@ openclaw onboard --install-daemon
 
 ---
 
-## Quick start (Local + Tunnel) / 快速开始（本机 + Tunnel）
+## Quick start / 快速开始（双语）
 
-### 1) Install & run / 安装并运行
+> 默认推荐：**Socket Mode（长连接）**，本地开发无需公网 URL / tunnel。
+
+### 1) Install / 安装
 
 ```bash
-git clone https://github.com/yearnst/feishu-bridge-for-openclaw.git
-cd feishu-bridge-for-openclaw
 cp .env.example .env
 npm install
-npm start
 ```
 
-Health check:
-- `GET http://127.0.0.1:8787/health`
+### 2A) Socket Mode（Recommended）/ 长连接模式（推荐）
 
-### 2) Start a tunnel / 启动一个 tunnel（任选）
+Feishu 控制台：事件订阅 → 订阅方式选择 **长连接（Socket Mode）**，订阅事件 `im.message.receive_v1`。
+
+`.env`（最小配置）：
+
+```env
+FEISHU_RECEIVE_MODE=socket
+HTTP_SERVER_ENABLED=false
+```
+
+Run / 运行：
 
 ```bash
-# localtunnel
-npx localtunnel --port 8787
-
-# or ngrok
-# ngrok http 8787
-
-# or cloudflared
-# cloudflared tunnel --url http://127.0.0.1:8787
+npm run start:socket
 ```
 
-### 3) Configure Feishu Event Subscription / 配置飞书事件订阅
+### 2B) Webhook Mode / 回调模式（需要公网 URL 或 tunnel）
 
-Request URL:
-- `https://<your-public-domain>/feishu/events`
+Feishu 控制台：事件订阅 → 订阅方式选择 **开发者服务器（Webhook）**，Request URL 指向：
+`https://<your-domain-or-tunnel>/feishu/events`
 
-Subscribe event:
-- `im.message.receive_v1`
+`.env`（最小配置）：
 
-Security options:
-- Recommended: set `FEISHU_VERIFICATION_TOKEN`
-- Optional: enable Encrypt Key and set `FEISHU_ENCRYPT_KEY` (32 bytes)
+```env
+FEISHU_RECEIVE_MODE=webhook
+HTTP_SERVER_ENABLED=true
+PORT=8787
+FEISHU_VERIFICATION_TOKEN=...   # optional but recommended
+FEISHU_ENCRYPT_KEY=...          # optional (32 bytes)
+```
 
-### 4) First wiring test / 首次联调建议
+Run / 运行：
 
-- Keep `ECHO_MODE=true`
-- Send a text message to the bot and confirm it echoes
-- Then set `ECHO_MODE=false` to forward to OpenClaw
+```bash
+npm run start:webhook
+```
+
+Health check / 健康检查：`GET http://127.0.0.1:8787/health`
+
+---
+
+## Docs / 文档
+
+- 中文：`README.zh-CN.md` / `DEPLOY.zh-CN.md`
+- English: `README.en.md` / `DEPLOY.en.md`
+
+Tip / 提示：首次联调建议先用 `ECHO_MODE=true`，确认机器人能回声，再切 `ECHO_MODE=false` 走模型转发。
 
 ---
 

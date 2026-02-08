@@ -47,11 +47,48 @@
 ## 运行（本机）
 
 ```bash
-cd feishu-bridge
 cp .env.example .env
 npm install
-npm start
 ```
+
+### 方式 A：长连接（Socket Mode，推荐本地开发）
+
+1) 飞书开放平台后台把「事件订阅」切到「使用长连接接收事件」，并勾选 `im.message.receive_v1`
+2) 配置 `.env`：
+
+```env
+FEISHU_RECEIVE_MODE=socket
+HTTP_SERVER_ENABLED=false
+```
+
+3) 启动：
+
+```bash
+npm run start:socket
+# 或 npm start（按 .env/默认值）
+```
+
+### 方式 B：Webhook（开发者服务器回调，适合线上部署）
+
+1) 飞书开放平台后台选择「将事件发送至开发者服务器」，配置 Request URL 指向：
+   `https://<your-tunnel-or-domain>/feishu/events`
+2) 配置 `.env`：
+
+```env
+FEISHU_RECEIVE_MODE=webhook
+HTTP_SERVER_ENABLED=true
+PORT=8787
+FEISHU_VERIFICATION_TOKEN=...   # 如后台开启了 verification token
+FEISHU_ENCRYPT_KEY=...          # 如后台开启了 encrypt key
+```
+
+3) 启动：
+
+```bash
+npm run start:webhook
+```
+
+> 注意：生产环境不要同时启用两种订阅方式，避免事件来源混乱。
 
 > 想要完整“小白部署”步骤（含飞书控制台配置、tunnel、验证），看：`DEPLOY.zh-CN.md`
 

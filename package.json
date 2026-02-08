@@ -10,9 +10,13 @@
     "node": ">=18"
   },
   "scripts": {
-    "start": "node --env-file=.env server.js"
+    "start": "node --env-file=.env server.js",
+    "start:webhook": "FEISHU_RECEIVE_MODE=webhook HTTP_SERVER_ENABLED=true node --env-file=.env server.js",
+    "start:socket": "FEISHU_RECEIVE_MODE=socket HTTP_SERVER_ENABLED=false node --env-file=.env server.js",
+    "start:both": "FEISHU_RECEIVE_MODE=both HTTP_SERVER_ENABLED=true node --env-file=.env server.js"
   },
   "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.58.0",
     "dotenv": "^17.2.3",
     "express": "^4.19.2"
   }
