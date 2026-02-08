@@ -1,6 +1,6 @@
 {
   "name": "feishu-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Feishu/Lark Event Subscription bridge → forward to local OpenClaw/Clawdbot agent → reply back (supports files/images).",
   "author": "Charles Chern @AIlinker",
   "license": "MIT",
