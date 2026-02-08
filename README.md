@@ -115,6 +115,25 @@ Tip / 提示：首次联调建议先用 `ECHO_MODE=true`，确认机器人能回
 
 ---
 
+## Screenshots / 截图
+
+<details>
+<summary>Click to expand / 点击展开</summary>
+
+### Socket Mode / 长连接
+
+<img src="assets/Screenshots/飞书后台机器人配置-[长连接socket方式].png" width="720" />
+
+<img src="assets/Screenshots/飞书对话-[长连接socket方式].png" width="720" />
+
+### Webhook Mode / 回调
+
+<img src="assets/Screenshots/飞书机器人配置-事件与回调--[开发者服务器webhook方式].png" width="720" />
+
+</details>
+
+---
+
 ## Deploy (Server / Docker) / 部署（服务器 / Docker）
 
 ```bash
